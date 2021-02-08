@@ -8,6 +8,11 @@ export function pause_video(elm_id) {
     elm.pause();
 }
 
+export function reload_video(elm_id) {
+    let elm = document.getElementById(elm_id);
+    elm.load();
+}
+
 export function seek_video(elm_id, pos) {
     let elm = document.getElementById(elm_id);
     elm.currentTime = pos;

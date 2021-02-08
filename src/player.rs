@@ -11,7 +11,7 @@ use serde::{Serialize, Deserialize};
 use crate::video;
 use crate::opcodes;
 use crate::settings;
-use crate::utils::{emit_event, start_future, send_post, send_future};
+use crate::utils::{emit_event, start_future, send_post};
 use crate::websocket::{WsHandler, WebsocketMessage, WrappingWsMessage};
 
 
@@ -29,30 +29,66 @@ pub struct Video {
 }
 
 
+/// The payload of the `OP_SET_BULK_TRACKS` operation.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BulkVideos {
+    /// A list of videos that can be any length >= 0
     videos: Vec<Video>,
 }
 
 
+/// The set component properties that can be set by the parent component.
 #[derive(Properties, Clone)]
 pub struct MediaPlayerProperties {
+    /// The WS handle for subscribing to events.
     pub ws: WsHandler,
 
+    /// The room id of the given room.
     pub room_id: String,
 }
 
+/// A given event that can be sent to the MediaPlayer, this can be invoked
+/// by *either* the websocket or the user.
 pub enum MediaPlayerEvent {
+    /// Signals if the Tracks should be rotated by 1, if the bool wrapped is
+    /// `true` then this event will also be emitted to the websocket otherwise
+    /// it will be a localised change only, this basically is just so the
+    /// websocket doesnt recursively invoke itself again.
     Next(bool),
+
+    /// Signals if the Tracks should be rotated by -1, if the bool wrapped is
+    /// `true` then this event will also be emitted to the websocket otherwise
+    /// it will be a localised change only, this basically is just so the
+    /// websocket doesnt recursively invoke itself again.
     Previous(bool),
+
+    /// Adds a video contained within the `WebsocketMessage` to the end of
+    /// the queue of tracks. Panics if the message is empty.
     AddVideo(WebsocketMessage),
+
+    /// Removes the currently active video.
     RemoveVideo,
+
+    /// An event to signal the player to get all videos it has in the queue
+    /// and send them to the other clients.
     SyncTracks,
+
+    /// An event to set the tracks of the given message originating from the
+    /// SyncTracks event. The clients will then pick their
+    /// queue off if the sent queue is larger or smaller. They will always
+    /// pick the largest queue over a comparison of two.
     SetBulkTracks(WebsocketMessage),
 }
 
-/// The video player and details component, this is the wrapper over the
-/// custom video player providing interactions like next, previous and other
+/// The video player and details component.
+///
+/// This displays the help page of the player if no videos are added or set
+/// otherwise it shows the video of the currently selected track according
+/// to what all the other players are set to.
+///
+/// This components uses the VideoPlayer component to extend its base and
+/// handle the actual video events itself, this just displays the title
+/// and gives controls for track selection.
 pub struct MediaPlayer {
     link: ComponentLink<Self>,
     videos: VecDeque<Video>,
@@ -97,6 +133,15 @@ impl Component for MediaPlayer {
         }
     }
 
+    /// Handles the media player events based off the Websocket and localised
+    /// events.
+    ///
+    /// `MediaPlayerEvent::Next` and `MediaPlayerEvent::Previous` both contain
+    /// a bool to signal if they should emit events to the gateway or not
+    /// this is because both the user callbacks and websocket callbacks are
+    /// the same just with a different bool signal, this is to cut down the
+    /// size of the code base and keep it simple as unlike the video player
+    /// these are not massively specialised.
     fn update(&mut self, msg: Self::Message) -> ShouldRender {
         match msg {
             MediaPlayerEvent::Next(emit) => {
@@ -177,6 +222,15 @@ impl Component for MediaPlayer {
         false
     }
 
+    /// Renders the whole media player half of the page.
+    ///
+    /// This displays the help page of the player if no videos are added or set
+    /// otherwise it shows the video of the currently selected track according
+    /// to what all the other players are set to.
+    ///
+    /// This components uses the VideoPlayer component to extend its base and
+    /// handle the actual video events itself, this just displays the title
+    /// and gives controls for track selection.
     fn view(&self) -> Html {
         let render = if self.videos.len() > 0 {
             let (url, title) = {
@@ -297,15 +351,25 @@ impl Component for MediaPlayer {
 }
 
 
+/// A seek event payload.
 #[derive(Serialize, Deserialize)]
 struct SeekTo {
+    /// The position of the track in seconds.
     pos: u32,
 }
 
+
+/// The finalised payload for sending a time check response, this allows
+/// the gateway to calculate a average and emit to all players.
+///
+/// Why is this not just a SeekTo struct? -> Im not sure but it's likely going
+/// to change as beta rolls out so id rather keep these separate for now.
 #[derive(Serialize)]
 struct SubmitTimeCheck {
+    /// The position of the track in seconds.
     pos: u32,
 }
+
 
 /// The video player properties that can be specified.
 #[derive(Properties, Clone)]
@@ -313,38 +377,75 @@ pub struct PlayerProperties {
     /// The video source
     src: String,
 
+    /// The WS handle to subscribe and register event listeners.
     ws: WsHandler,
 
+    /// The room id of the current url.
     room_id: String,
 }
 
 
 /// All video player event spec
 pub enum VideoEvent {
+    /// Starts playing the video due to the user clicking the play button.
     Play,
+
+    /// Pauses the video from a user event / button click.
     Pause,
+
+    /// Mutes the video, this also hides volume controls.
     Mute,
+
+    /// UnMutes the video and shows the audio controls again.
     UnMute,
+
+    /// Maximises the video player.
     FullScreen,
 
+    /// Invokes a callback to take a snapshot of the position of the seekbar
+    /// in order to send to the websocket.
     ShouldSend,
+
+    /// Called when ever the mouse is clicking on the input and adjusting
+    /// the value done on a range of 0 - 1000
     UpdateSeek(InputData),
+
+    /// Called when ever the video time is polled and the time is changed,
+    /// this has a default resolution of 1s as that's all the interval fires at.
     UpdatePos,
 
+    /// Adjusts the volume from 0 - 100 based on what the slider value is.
     UpdateVol(InputData),
 }
 
 
+/// The Websocket type events that can be invoked via the websocket to
+/// control the media player.
 pub enum VideoWebsocketEvent {
+    /// Plays the video if the user has clicked the button first.
     Play,
+
+    /// Pauses the video if its not already paused.
     Pause,
+
+    /// Seeks the player to a given position contained within the web ws
+    /// message.
     Seek(WebsocketMessage),
+
+    /// A synchronising callback to allow players to sync times with each other
+    /// when a new client joins, this should not interrupt the running players
+    /// however, instead it should just take a reference and echo it back.
     TimeCheck,
 }
 
 
+/// The two separate types of player events the video player can receive,
+/// either from the websocket or from the video element itself.
 pub enum VideoPlayerEvents {
+    /// Websocket invoked events.
     Websocket(VideoWebsocketEvent),
+
+    /// User invoked events.
     VideoEvent(VideoEvent),
 }
 
@@ -443,10 +544,18 @@ impl Component for VideoPlayer {
         true
     }
 
-    fn change(&mut self, _props: Self::Properties) -> ShouldRender {
-        false
+    fn change(&mut self, props: Self::Properties) -> ShouldRender {
+        if &self.player.src == &props.src {
+            return false;
+        }
+
+        self.player.set_src(props.src);
+        true
     }
 
+
+    /// Renders the custom HTML player which has its own controls instead of
+    /// the default player controls.
     fn view(&self) -> Html {
         let play_pause = if self.player.playing {
             let onclick = self.link.callback(
@@ -569,7 +678,7 @@ impl Component for VideoPlayer {
 
         html! {
             <div class="flex justify-center w-full">
-                <div id="video-container" class="relative">
+                <div id="video-container" class="relative w-full">
                     { self.player.view() }
                     { player_controls }
                 </div>
@@ -579,6 +688,9 @@ impl Component for VideoPlayer {
 }
 
 impl VideoPlayer {
+    /// Invokes the relevant callbacks and code on a given video event,
+    /// these are only invoked from the user on the website clicking something
+    /// as an action rather than the websocket invoking something.
     fn on_video_event(&mut self, event: VideoEvent) {
         match event {
             VideoEvent::Play => {
@@ -649,6 +761,8 @@ impl VideoPlayer {
         };
     }
 
+    /// Matches a given websocket event relevant to the video player
+    /// and invokes it's relevant callbacks.
     fn on_ws_message(&mut self, msg: VideoWebsocketEvent) {
         match msg {
             VideoWebsocketEvent::Play => {
@@ -686,6 +800,9 @@ impl VideoPlayer {
         };
     }
 
+    /// Invoked when the player has seeked to a location and the mouse has
+    /// been released, this allows the socket to only send one seek request
+    /// per selection and also to minimise socket traffic.
     fn on_seek_complete(&mut self, pos: u32) {
         let seek_to = SeekTo { pos };
         let msg = WrappingWsMessage {
@@ -696,6 +813,8 @@ impl VideoPlayer {
         start_future(emit_event(self.room_id.clone(), msg));
     }
 
+    /// Invoked when the play button is clicked on the player, this is not
+    /// invoked when it is called from rust however.
     fn on_play(&mut self) {
         let msg = WrappingWsMessage {
             opcode: opcodes::OP_PLAY,
@@ -705,6 +824,8 @@ impl VideoPlayer {
         start_future(emit_event(self.room_id.clone(), msg));
     }
 
+    /// Invoked when the pause button is clicked on the player, this is not
+    /// invoked when it is called from rust however.
     fn on_pause(&mut self) {
         let msg = WrappingWsMessage {
             opcode: opcodes::OP_PAUSE,

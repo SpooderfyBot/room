@@ -48,6 +48,13 @@ impl  Video {
         }
     }
 
+    pub fn set_src(&mut self, src: String) {
+        self.src = src;
+        self.pause();
+        self.seek(0);
+        binder::reload_video(&VIDEO_PLAYER_ID)
+    }
+
     pub fn mute(&mut self) {
         if !self.muted {
             self.muted = true;
@@ -103,7 +110,7 @@ impl  Video {
     pub fn view(&self) -> Html {
 
         html! {
-            <video id="video-player" class="rounded-lg w-full h-full" controls=self.controls>
+            <video id="video-player" class="rounded-lg h-full mx-auto" style="min-width: 66%;" controls=self.controls>
                 <source src=&self.src/>
             </video>
         }

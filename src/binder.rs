@@ -9,6 +9,9 @@ extern "C" {
     #[wasm_bindgen(js_name = "pause_video")]
     pub fn pause_video(elm_id: &str);
 
+    #[wasm_bindgen(js_name = "reload_video")]
+    pub fn reload_video(elm_id: &str);
+
     #[wasm_bindgen(js_name = "seek_video")]
     pub fn seek_video(elm_id: &str, position: u32);
 
