@@ -1,14 +1,14 @@
 use yew::prelude::*;
 use yew::services::{IntervalService, ConsoleService};
 use yew::services::interval::IntervalTask;
+use wasm_bindgen::JsValue;
 
 use std::time::Duration;
-use std::collections::VecDeque;
-use std::borrow::Borrow;
 
 use serde::{Serialize, Deserialize};
 
 use crate::video;
+use crate::video::{VideoType, MediaPlaylist, QueuedVideo};
 use crate::opcodes;
 use crate::settings;
 use crate::utils::{emit_event, start_future, send_post};
@@ -16,24 +16,11 @@ use crate::websocket::{WsHandler, WebsocketMessage, WrappingWsMessage};
 
 
 
-/// A video track that can be loaded by the video player, this should contain
-/// all relevant data needed for the video player to select the correct
-/// settings and display the extra info.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Video {
-    /// The video title
-    title: String,
-
-    /// The video url
-    url: String,
-}
-
-
 /// The payload of the `OP_SET_BULK_TRACKS` operation.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BulkVideos {
     /// A list of videos that can be any length >= 0
-    videos: Vec<Video>,
+    videos: Vec<QueuedVideo>,
 }
 
 
@@ -78,6 +65,9 @@ pub enum MediaPlayerEvent {
     /// queue off if the sent queue is larger or smaller. They will always
     /// pick the largest queue over a comparison of two.
     SetBulkTracks(WebsocketMessage),
+
+    /// A callback for torrents and extractor to call off.
+    SubmitFiles((usize, Vec<JsValue>))
 }
 
 /// The video player and details component.
@@ -90,9 +80,16 @@ pub enum MediaPlayerEvent {
 /// handle the actual video events itself, this just displays the title
 /// and gives controls for track selection.
 pub struct MediaPlayer {
+    /// The player component link for callbacks
     link: ComponentLink<Self>,
-    videos: VecDeque<Video>,
+
+    /// The videos in the playlists.
+    videos: MediaPlaylist,
+
+    /// The websocket handle for subscribing to events.
     ws: WsHandler,
+
+    /// The current room id.
     room_id: String,
 }
 
@@ -107,6 +104,10 @@ impl Component for MediaPlayer {
         let remove_video_cb = link.callback(|_event: WebsocketMessage| MediaPlayerEvent::RemoveVideo);
         let sync_tracks_cb = link.callback(|_event: WebsocketMessage| MediaPlayerEvent::SyncTracks);
         let bulk_tracks_cb = link.callback(|event: WebsocketMessage| MediaPlayerEvent::SetBulkTracks(event));
+
+        let submit_video_cb = link.callback(
+            |data| MediaPlayerEvent::SubmitFiles(data)
+        );
 
         let ws = props.ws;
         ws.subscribe_to_message(settings::PLAYER_ID, opcodes::OP_NEXT, next_cb);
@@ -126,8 +127,10 @@ impl Component for MediaPlayer {
         ));
 
         Self {
-            link,
-            videos: VecDeque::new(),
+            link: link.clone(),
+
+            videos: MediaPlaylist::new(submit_video_cb),
+
             ws,
             room_id: props.room_id,
         }
@@ -153,7 +156,7 @@ impl Component for MediaPlayer {
 
                     start_future(emit_event(self.room_id.clone(), msg))
                 } else {
-                    self.videos.rotate_left(1)
+                    self.videos.rotate_next()
                 }
             },
             MediaPlayerEvent::Previous(emit) => {
@@ -165,22 +168,18 @@ impl Component for MediaPlayer {
 
                     start_future(emit_event(self.room_id.clone(), msg))
                 } else {
-                    self.videos.rotate_right(1)
+                    self.videos.rotate_prev()
                 }
             },
             MediaPlayerEvent::AddVideo(msg) => {
-                let video: Video = msg.unwrap_and_into().unwrap();
-                self.videos.push_back(video);
+                let video: QueuedVideo = msg.unwrap_and_into().unwrap();
+                self.videos.append_video(video);
             },
             MediaPlayerEvent::RemoveVideo => {
-                self.videos.remove(0);
+                self.videos.delete_current();
             },
             MediaPlayerEvent::SyncTracks => {
-                let mut to_dump = BulkVideos { videos: Vec::new() };
-                let existing = self.videos.drain(..);
-                for video in existing {
-                    to_dump.videos.push(video);
-                }
+                let to_dump = BulkVideos { videos: self.videos.get_queued_videos() };
 
                 let res = serde_json::to_value(to_dump);
                 let dumped = match res {
@@ -204,15 +203,15 @@ impl Component for MediaPlayer {
             MediaPlayerEvent::SetBulkTracks(msg) => {
                 let bulk: BulkVideos = msg.unwrap_and_into().unwrap();
 
-                if self.videos.len() > bulk.videos.len() {
+                if self.videos.queue_len() > bulk.videos.len() {
                     return false;
                 }
 
-                self.videos.clear();
-                for video in bulk.videos {
-                    self.videos.push_back(video);
-                }
+                self.videos.set_queued_videos(bulk.videos);
             },
+            MediaPlayerEvent::SubmitFiles((index, files)) => {
+                self.videos.submit_video(index, files);
+            }
         }
 
         true
@@ -233,13 +232,7 @@ impl Component for MediaPlayer {
     /// and gives controls for track selection.
     fn view(&self) -> Html {
         let render = if self.videos.len() > 0 {
-            let (url, title) = {
-                let video = self.videos[0].borrow();
-                let url = video.url.clone();
-                let title = video.title.clone();
-
-                (url, title)
-            };
+            let (title, video_type) = self.videos.get_video();
 
             let next_cb = self.link.callback(|_| MediaPlayerEvent::Next(true));
             let prev_cb = self.link.callback(|_| MediaPlayerEvent::Previous(true));
@@ -252,7 +245,7 @@ impl Component for MediaPlayer {
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 15l-3-3m0 0l3-3m-3 3h8M3 12a9 9 0 1118 0 9 9 0 01-18 0z" />
                         </svg>
                     </button>
-                    <h1 class="text-white text-3xl font-semibold w-auto">{title}</h1>
+                    <h1 class="text-white text-center text-3xl font-semibold w-3/4">{title}</h1>
                     <button onclick=prev_cb class="text-white hover:text-blue-600 cursor-pointer transition duration-200 h-8 w-8">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 9l3 3m0 0l-3 3m3-3H8m13 0a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -262,7 +255,7 @@ impl Component for MediaPlayer {
                 <div class="flex justify-center w-full">
                     <div class="bg-white rounded-full w-full pt-1 px-4 my-2"></div>
                 </div>
-                <VideoPlayer src=url ws=self.ws.clone() room_id=self.room_id.clone()/>
+                <VideoPlayer video=video_type ws=self.ws.clone() room_id=self.room_id.clone()/>
                 </>
             }
         } else {
@@ -375,7 +368,7 @@ struct SubmitTimeCheck {
 #[derive(Properties, Clone)]
 pub struct PlayerProperties {
     /// The video source
-    src: String,
+    video: VideoType,
 
     /// The WS handle to subscribe and register event listeners.
     ws: WsHandler,
@@ -467,7 +460,7 @@ impl Component for VideoPlayer {
     type Properties = PlayerProperties;
 
     fn create(props: Self::Properties, link: ComponentLink<Self>) -> Self {
-        let video_player = video::Video::new(false, props.src);
+        let video_player = video::Video::new(false, props.video);
 
         let ticker = link.callback(
             |_| VideoPlayerEvents::VideoEvent(VideoEvent::UpdatePos)
@@ -545,11 +538,11 @@ impl Component for VideoPlayer {
     }
 
     fn change(&mut self, props: Self::Properties) -> ShouldRender {
-        if &self.player.src == &props.src {
+        if &self.player.video == &props.video {
             return false;
         }
 
-        self.player.set_src(props.src);
+        self.player.set_video(props.video);
         true
     }
 
@@ -676,11 +669,28 @@ impl Component for VideoPlayer {
             </div>
         };
 
+        let render = if self.player.ready_state != 0 {
+            html! {
+                <>
+                    { self.player.view() }
+                    { player_controls }
+                </>
+            }
+        } else {
+            html! {
+                <>
+                    <h1 class="w-full text-center text-white tex-5xl font-semibold">
+                        {"Loading video..."}
+                    </h1>
+                    { self.player.view() }
+                </>
+            }
+        };
+
         html! {
             <div class="flex justify-center w-full">
                 <div id="video-container" class="relative w-full">
-                    { self.player.view() }
-                    { player_controls }
+                    { render }
                 </div>
             </div>
         }

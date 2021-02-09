@@ -57,3 +57,8 @@ export function maximise(elm_id) {
 export function minimise(_elm_id) {
     document.exitFullscreen().then(r => console.log("Failed to full screen"));
 }
+
+export function get_state(elm_id) {
+    let elm = document.getElementById(elm_id);
+    return elm.readyState
+}

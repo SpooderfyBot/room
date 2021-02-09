@@ -8,6 +8,7 @@ mod opcodes;
 mod websocket;
 mod settings;
 mod utils;
+mod webtorrent;
 
 use wasm_bindgen::prelude::*;
 use yew::prelude::*;

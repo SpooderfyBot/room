@@ -38,4 +38,7 @@ extern "C" {
 
     #[wasm_bindgen(js_name = "minimise")]
     pub fn minimise(elm_id: &str);
+
+    #[wasm_bindgen(js_name = "get_state")]
+    pub fn get_state(elm_id: &str) -> u32;
 }
