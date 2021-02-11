@@ -1,27 +1,11 @@
 use yew::prelude::*;
-use yew::services::{IntervalService, ConsoleService};
-use yew::services::interval::IntervalTask;
-use wasm_bindgen::JsValue;
+use yew::services::ConsoleService;
 
-use std::time::Duration;
+use serde::Deserialize;
 
-use serde::{Serialize, Deserialize};
-
-use crate::video;
-use crate::video::{VideoType, MediaPlaylist, QueuedVideo};
 use crate::opcodes;
 use crate::settings;
-use crate::utils::{emit_event, start_future, send_post};
-use crate::websocket::{WsHandler, WebsocketMessage, WrappingWsMessage};
-
-
-
-/// The payload of the `OP_SET_BULK_TRACKS` operation.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BulkVideos {
-    /// A list of videos that can be any length >= 0
-    videos: Vec<QueuedVideo>,
-}
+use crate::websocket::{WsHandler, WebsocketMessage, WebsocketStatus};
 
 
 /// The set component properties that can be set by the parent component.
@@ -34,41 +18,25 @@ pub struct MediaPlayerProperties {
     pub room_id: String,
 }
 
-/// A given event that can be sent to the MediaPlayer, this can be invoked
-/// by *either* the websocket or the user.
+
 pub enum MediaPlayerEvent {
-    /// Signals if the Tracks should be rotated by 1, if the bool wrapped is
-    /// `true` then this event will also be emitted to the websocket otherwise
-    /// it will be a localised change only, this basically is just so the
-    /// websocket doesnt recursively invoke itself again.
-    Next(bool),
-
-    /// Signals if the Tracks should be rotated by -1, if the bool wrapped is
-    /// `true` then this event will also be emitted to the websocket otherwise
-    /// it will be a localised change only, this basically is just so the
-    /// websocket doesnt recursively invoke itself again.
-    Previous(bool),
-
-    /// Adds a video contained within the `WebsocketMessage` to the end of
-    /// the queue of tracks. Panics if the message is empty.
-    AddVideo(WebsocketMessage),
-
-    /// Removes the currently active video.
-    RemoveVideo,
-
-    /// An event to signal the player to get all videos it has in the queue
-    /// and send them to the other clients.
-    SyncTracks,
-
-    /// An event to set the tracks of the given message originating from the
-    /// SyncTracks event. The clients will then pick their
-    /// queue off if the sent queue is larger or smaller. They will always
-    /// pick the largest queue over a comparison of two.
-    SetBulkTracks(WebsocketMessage),
-
-    /// A callback for torrents and extractor to call off.
-    SubmitFiles((usize, Vec<JsValue>))
+    SocketStatus(WebsocketStatus),
+    StatsUpdate(WebsocketMessage)
 }
+
+#[derive(Deserialize)]
+struct Stats {
+    members: usize,
+    multiplier: String,
+}
+
+
+#[derive(Deserialize)]
+struct VideoInfo {
+    owner: String,
+    title: String,
+}
+
 
 /// The video player and details component.
 ///
@@ -83,14 +51,16 @@ pub struct MediaPlayer {
     /// The player component link for callbacks
     link: ComponentLink<Self>,
 
-    /// The videos in the playlists.
-    videos: MediaPlaylist,
-
     /// The websocket handle for subscribing to events.
     ws: WsHandler,
 
     /// The current room id.
     room_id: String,
+
+    is_connected: bool,
+
+    stats: Stats,
+    info: VideoInfo,
 }
 
 impl Component for MediaPlayer {
@@ -98,41 +68,34 @@ impl Component for MediaPlayer {
     type Properties = MediaPlayerProperties;
 
     fn create(props: Self::Properties, link: ComponentLink<Self>) -> Self {
-        let next_cb = link.callback(|_event: WebsocketMessage| MediaPlayerEvent::Next(false));
-        let prev_cb = link.callback(|_event: WebsocketMessage| MediaPlayerEvent::Previous(false));
-        let add_video_cb = link.callback(|event| MediaPlayerEvent::AddVideo(event));
-        let remove_video_cb = link.callback(|_event: WebsocketMessage| MediaPlayerEvent::RemoveVideo);
-        let sync_tracks_cb = link.callback(|_event: WebsocketMessage| MediaPlayerEvent::SyncTracks);
-        let bulk_tracks_cb = link.callback(|event: WebsocketMessage| MediaPlayerEvent::SetBulkTracks(event));
-
-        let submit_video_cb = link.callback(
-            |data| MediaPlayerEvent::SubmitFiles(data)
+        let event_cb = link.callback(
+            |event| MediaPlayerEvent::StatsUpdate(event)
+        );
+        let status_cb = link.callback(
+            |event| MediaPlayerEvent::SocketStatus(event)
         );
 
         let ws = props.ws;
-        ws.subscribe_to_message(settings::PLAYER_ID, opcodes::OP_NEXT, next_cb);
-        ws.subscribe_to_message(settings::PLAYER_ID, opcodes::OP_PREV, prev_cb);
-        ws.subscribe_to_message(settings::PLAYER_ID, opcodes::OP_ADD_TRACK, add_video_cb);
-        ws.subscribe_to_message(settings::PLAYER_ID, opcodes::OP_REMOVE_TRACK, remove_video_cb);
-        ws.subscribe_to_message(settings::PLAYER_ID, opcodes::OP_SYNC_TRACKS, sync_tracks_cb);
-        ws.subscribe_to_message(settings::PLAYER_ID, opcodes::OP_SET_BULK_TRACKS, bulk_tracks_cb);
+        ws.subscribe_to_message(settings::PLAYER_ID, opcodes::OP_STATS_UPDATE, event_cb);
+        ws.subscribe_to_status(settings::PLAYER_ID, status_cb);
 
-        let msg = WrappingWsMessage {
-            opcode: opcodes::OP_SYNC_TRACKS,
-            payload: None
+        let stats = Stats {
+            members: 1,
+            multiplier: "1x".to_string(),
         };
-        start_future(emit_event(
-            props.room_id.clone(),
-            msg,
-        ));
+        
+        let info = VideoInfo {
+            owner: "ハーリさん (CF8)".to_string(),
+            title: "Some Stream".to_string()
+        };
 
         Self {
             link: link.clone(),
-
-            videos: MediaPlaylist::new(submit_video_cb),
-
             ws,
             room_id: props.room_id,
+            is_connected: false,
+            stats,
+            info,
         }
     }
 
@@ -147,70 +110,25 @@ impl Component for MediaPlayer {
     /// these are not massively specialised.
     fn update(&mut self, msg: Self::Message) -> ShouldRender {
         match msg {
-            MediaPlayerEvent::Next(emit) => {
-                if emit {
-                    let msg = WrappingWsMessage {
-                        opcode: opcodes::OP_NEXT,
-                        payload: None
-                    };
-
-                    start_future(emit_event(self.room_id.clone(), msg))
+            MediaPlayerEvent::StatsUpdate(val) => {
+                if let Some(stats) = val.unwrap_and_into::<Stats>() {
+                    self.stats = stats
                 } else {
-                    self.videos.rotate_next()
-                }
+                    ConsoleService::warn("Failed to parse status update in player");
+                };
             },
-            MediaPlayerEvent::Previous(emit) => {
-                if emit {
-                    let msg = WrappingWsMessage {
-                        opcode: opcodes::OP_PREV,
-                        payload: None
-                    };
-
-                    start_future(emit_event(self.room_id.clone(), msg))
-                } else {
-                    self.videos.rotate_prev()
-                }
-            },
-            MediaPlayerEvent::AddVideo(msg) => {
-                let video: QueuedVideo = msg.unwrap_and_into().unwrap();
-                self.videos.append_video(video);
-            },
-            MediaPlayerEvent::RemoveVideo => {
-                self.videos.delete_current();
-            },
-            MediaPlayerEvent::SyncTracks => {
-                let to_dump = BulkVideos { videos: self.videos.get_queued_videos() };
-
-                let res = serde_json::to_value(to_dump);
-                let dumped = match res {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let msg = format!("{:?}", e);
-                        ConsoleService::log(&msg);
-                        return true;
+            MediaPlayerEvent::SocketStatus(status) => {
+                match status {
+                    WebsocketStatus::ClosedPermanently => {
+                        self.is_connected = false;
+                    },
+                    WebsocketStatus::Disconnect => {
+                        self.is_connected = false;
+                    },
+                    WebsocketStatus::Connect => {
+                        self.is_connected = true;
                     }
-                };
-
-                let msg = WrappingWsMessage {
-                    opcode: opcodes::OP_SET_BULK_TRACKS,
-                    payload: Some(dumped)
-                };
-
-                start_future(emit_event(self.room_id.clone(), msg));
-
-                return false;
-            },
-            MediaPlayerEvent::SetBulkTracks(msg) => {
-                let bulk: BulkVideos = msg.unwrap_and_into().unwrap();
-
-                if self.videos.queue_len() > bulk.videos.len() {
-                    return false;
                 }
-
-                self.videos.set_queued_videos(bulk.videos);
-            },
-            MediaPlayerEvent::SubmitFiles((index, files)) => {
-                self.videos.submit_video(index, files);
             }
         }
 
@@ -231,617 +149,101 @@ impl Component for MediaPlayer {
     /// handle the actual video events itself, this just displays the title
     /// and gives controls for track selection.
     fn view(&self) -> Html {
-        let render = if self.videos.len() > 0 {
-            let (title, video_type) = self.videos.get_video();
-
-            let next_cb = self.link.callback(|_| MediaPlayerEvent::Next(true));
-            let prev_cb = self.link.callback(|_| MediaPlayerEvent::Previous(true));
-
-            html! {
-                <>
-                <div class="flex justify-between items-center w-full">
-                    <button onclick=next_cb class="text-white hover:text-blue-600 cursor-pointer transition duration-200 h-8 w-8">
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 15l-3-3m0 0l3-3m-3 3h8M3 12a9 9 0 1118 0 9 9 0 01-18 0z" />
-                        </svg>
-                    </button>
-                    <h1 class="text-white text-center text-3xl font-semibold w-3/4">{title}</h1>
-                    <button onclick=prev_cb class="text-white hover:text-blue-600 cursor-pointer transition duration-200 h-8 w-8">
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 9l3 3m0 0l-3 3m3-3H8m13 0a9 9 0 11-18 0 9 9 0 0118 0z" />
-                        </svg>
-                    </button>
+        let status = if self.is_connected {
+            html!{
+                <div class="text-white text-lg font-semibold flex items-center">
+                    <div class="inline-block bg-green-500 border-2 border-green-400 rounded-full w-2 h-2 p-1 mt-1 mx-2"></div>
+                    {"online"}
                 </div>
-                <div class="flex justify-center w-full">
-                    <div class="bg-white rounded-full w-full pt-1 px-4 my-2"></div>
-                </div>
-                <VideoPlayer video=video_type ws=self.ws.clone() room_id=self.room_id.clone()/>
-                </>
             }
         } else {
-            html! {
-                <div class="flex flex-col w-full" style="height: 600px;">
-                    <h1 class="text-white font-bold text-4xl py-4">
-                        {"🎉 Your room has been made!"}
-                    </h1>
-
-                    // Part 1
-                    <h1 class="text-white font-bold text-2xl py-4">
-                        {"1) Add a video with Spooderfy to get started:"}
-                    </h1>
-                    <div class="bg-discord rounded-lg shadow-md ml-12 px-4 mb-8 w-2/3">
-                        <div class="flex py-4">
-                            <img
-                                class="inline-block rounded-full h-12 w-12"
-                                src={"https://cdn.discordapp.com/avatars/290923752475066368/4921a5665c5320be55559d1a026fca68.webp?size=128"}
-                                alt=""
-                            />
-                            <div class="inline-block px-3 w-5/6">
-                                <h1 class="text-blue-400 font-semibold">{"ハーリさん (CF8)"}</h1>
-                                <p class="text-white">{"sp!addtrack https://myvideos.com/videotime \"My Title\""}</p>
-                            </div>
-                        </div>
-                        <div class="flex py-4">
-                            <img
-                                class="inline-block rounded-full h-12 w-12"
-                                src={"https://cdn.discordapp.com/avatars/585225058683977750/73628acbb1304b05c718f22a380767bd.png?size=128"}
-                                alt=""
-                            />
-                            <div class="inline-block px-3 w-5/6">
-                                <h1 class="text-blue-400 font-semibold">{"Spooderfy"}</h1>
-                                <div class="flex items-center">
-                                    <img
-                                        class="inline-block rounded-full h-5 w-5"
-                                        src={"https://spooderfy.com/static/images/spooderfy_white_fill.png"}
-                                        alt=""
-                                    />
-                                    <p class="text-white font-bold px-1">{"Added video: Hello, World!"}</p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    // Part 2
-                    <h1 class="text-white font-bold text-2xl py-4">
-                        {"2) Run sp!next to cycle the queue."}
-                    </h1>
-                    <div class="bg-discord rounded-lg shadow-md ml-12 px-4 w-2/3">
-                        <div class="flex py-4">
-                            <img
-                                class="inline-block rounded-full h-12 w-12"
-                                src={"https://cdn.discordapp.com/avatars/290923752475066368/4921a5665c5320be55559d1a026fca68.webp?size=128"}
-                                alt=""
-                            />
-                            <div class="inline-block px-3 w-5/6">
-                                <h1 class="text-blue-400 font-semibold">{"ハーリさん (CF8)"}</h1>
-                                <p class="text-white">{"sp!next"}</p>
-                            </div>
-                        </div>
-                        <div class="flex py-4">
-                            <img
-                                class="inline-block rounded-full h-12 w-12"
-                                src={"https://cdn.discordapp.com/avatars/585225058683977750/73628acbb1304b05c718f22a380767bd.png?size=128"}
-                                alt=""
-                            />
-                            <div class="inline-block px-3 w-5/6">
-                                <h1 class="text-blue-400 font-semibold">{"Spooderfy"}</h1>
-                                <p class="text-white font-bold px-1">{"🎉 Moved to next video!"}</p>
-                            </div>
-                        </div>
-                    </div>
+            html!{
+                <div class="text-white text-lg font-semibold flex items-center">
+                    <div class="inline-block bg-red-500 border-2 border-red-400 rounded-full w-2 h-2 p-1 mt-1 mx-2"></div>
+                    {"offline"}
                 </div>
             }
         };
 
-        html! {
-            <div class="w-2/3 p-4">
-                <div class="bg-discord-dark rounded-lg p-4">
-                    {render}
+
+        let members = html! {
+            <div class="flex justify-center items-center mx-2">
+                <div class="w-5 h-5 object-contain text-white mx-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                      <path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v3h8v-3zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-3a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v3h-3zM4.75 12.094A5.973 5.973 0 004 15v3H1v-3a3 3 0 013.75-2.906z" />
+                    </svg>
                 </div>
+                <h1 class="text-lg text-white font-semibold">{self.stats.members}</h1>
             </div>
-        }
-    }
-}
-
-
-/// A seek event payload.
-#[derive(Serialize, Deserialize)]
-struct SeekTo {
-    /// The position of the track in seconds.
-    pos: u32,
-}
-
-
-/// The finalised payload for sending a time check response, this allows
-/// the gateway to calculate a average and emit to all players.
-///
-/// Why is this not just a SeekTo struct? -> Im not sure but it's likely going
-/// to change as beta rolls out so id rather keep these separate for now.
-#[derive(Serialize)]
-struct SubmitTimeCheck {
-    /// The position of the track in seconds.
-    pos: u32,
-}
-
-
-/// The video player properties that can be specified.
-#[derive(Properties, Clone)]
-pub struct PlayerProperties {
-    /// The video source
-    video: VideoType,
-
-    /// The WS handle to subscribe and register event listeners.
-    ws: WsHandler,
-
-    /// The room id of the current url.
-    room_id: String,
-}
-
-
-/// All video player event spec
-pub enum VideoEvent {
-    /// Starts playing the video due to the user clicking the play button.
-    Play,
-
-    /// Pauses the video from a user event / button click.
-    Pause,
-
-    /// Mutes the video, this also hides volume controls.
-    Mute,
-
-    /// UnMutes the video and shows the audio controls again.
-    UnMute,
-
-    /// Maximises the video player.
-    FullScreen,
-
-    /// Invokes a callback to take a snapshot of the position of the seekbar
-    /// in order to send to the websocket.
-    ShouldSend,
-
-    /// Called when ever the mouse is clicking on the input and adjusting
-    /// the value done on a range of 0 - 1000
-    UpdateSeek(InputData),
-
-    /// Called when ever the video time is polled and the time is changed,
-    /// this has a default resolution of 1s as that's all the interval fires at.
-    UpdatePos,
-
-    /// Adjusts the volume from 0 - 100 based on what the slider value is.
-    UpdateVol(InputData),
-}
-
-
-/// The Websocket type events that can be invoked via the websocket to
-/// control the media player.
-pub enum VideoWebsocketEvent {
-    /// Plays the video if the user has clicked the button first.
-    Play,
-
-    /// Pauses the video if its not already paused.
-    Pause,
-
-    /// Seeks the player to a given position contained within the web ws
-    /// message.
-    Seek(WebsocketMessage),
-
-    /// A synchronising callback to allow players to sync times with each other
-    /// when a new client joins, this should not interrupt the running players
-    /// however, instead it should just take a reference and echo it back.
-    TimeCheck,
-}
-
-
-/// The two separate types of player events the video player can receive,
-/// either from the websocket or from the video element itself.
-pub enum VideoPlayerEvents {
-    /// Websocket invoked events.
-    Websocket(VideoWebsocketEvent),
-
-    /// User invoked events.
-    VideoEvent(VideoEvent),
-}
-
-
-/// The custom HTML5 video player this controls all custom components and
-/// the player itself as well as its relevant JS bindings.
-pub struct VideoPlayer {
-    link: ComponentLink<Self>,
-    player: video::Video,
-    _ws: WsHandler,
-    room_id: String,
-    _task: IntervalTask,
-    first_start: bool,
-    ignore_time_check: bool,
-}
-
-impl Component for VideoPlayer {
-    type Message = VideoPlayerEvents;
-    type Properties = PlayerProperties;
-
-    fn create(props: Self::Properties, link: ComponentLink<Self>) -> Self {
-        let video_player = video::Video::new(false, props.video);
-
-        let ticker = link.callback(
-            |_| VideoPlayerEvents::VideoEvent(VideoEvent::UpdatePos)
-        );
-
-        let task = IntervalService::spawn(
-            Duration::from_secs(1),
-            ticker
-        );
-
-        let on_play = link.callback(
-            |_| VideoPlayerEvents::Websocket(VideoWebsocketEvent::Play)
-        );
-
-        let on_pause = link.callback(
-            |_| VideoPlayerEvents::Websocket(VideoWebsocketEvent::Pause)
-        );
-
-        let on_seek = link.callback(
-            |event| VideoPlayerEvents::Websocket(VideoWebsocketEvent::Seek(event))
-        );
-
-        let on_time_check = link.callback(
-            |_| VideoPlayerEvents::Websocket(VideoWebsocketEvent::TimeCheck)
-        );
-
-
-        let ws = props.ws;
-        ws.subscribe_to_message(
-            settings::PLAYER_ID,
-            opcodes::OP_PLAY,
-            on_play
-        );
-
-        ws.subscribe_to_message(
-            settings::PLAYER_ID,
-            opcodes::OP_PAUSE,
-            on_pause
-        );
-
-        ws.subscribe_to_message(
-            settings::PLAYER_ID,
-            opcodes::OP_SEEK,
-            on_seek
-        );
-
-        ws.subscribe_to_message(
-            settings::PLAYER_ID,
-            opcodes::OP_TIME_CHECK,
-            on_time_check
-        );
-
-        Self {
-            link,
-            _ws: ws,
-            room_id: props.room_id,
-            player: video_player,
-            _task: task,
-            first_start: true,
-            ignore_time_check: false,
-        }
-    }
-
-    fn update(&mut self, msg: Self::Message) -> ShouldRender {
-        match msg {
-            VideoPlayerEvents::VideoEvent(event) => {
-                self.on_video_event(event)
-            },
-            VideoPlayerEvents::Websocket(msg) => {
-                self.on_ws_message(msg)
-            },
-        }
-
-        true
-    }
-
-    fn change(&mut self, props: Self::Properties) -> ShouldRender {
-        if &self.player.video == &props.video {
-            return false;
-        }
-
-        self.player.set_video(props.video);
-        true
-    }
-
-
-    /// Renders the custom HTML player which has its own controls instead of
-    /// the default player controls.
-    fn view(&self) -> Html {
-        let play_pause = if self.player.playing {
-            let onclick = self.link.callback(
-                |_| VideoPlayerEvents::VideoEvent(VideoEvent::Pause)
-            );
-            html!{
-                <button onclick=onclick class="text-white cursor-pointer focus:outline-none mx-2 h-8 w-8">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                </button>
-            }
-        } else {
-            let onclick = self.link.callback(
-                |_| VideoPlayerEvents::VideoEvent(VideoEvent::Play)
-            );
-            html!{
-                <button onclick=onclick class="text-white cursor-pointer focus:outline-none mx-2 h-8 w-8">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                </button>
-            }
         };
 
-        let mute = if self.player.muted {
-            let onclick = self.link.callback(
-                |_| VideoPlayerEvents::VideoEvent(VideoEvent::UnMute)
-            );
-            html!{
-                <button onclick=onclick class="text-white cursor-pointer focus:outline-none mx-2 h-8 w-8">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" clip-rule="evenodd" />
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
+
+        let multiplier = html!{
+            <div class="flex justify-center items-center mx-2">
+                <div class="w-5 h-5 object-contain text-red-600 mx-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                      <path fill-rule="evenodd" d="M12.395 2.553a1 1 0 00-1.45-.385c-.345.23-.614.558-.822.88-.214.33-.403.713-.57 1.116-.334.804-.614 1.768-.84 2.734a31.365 31.365 0 00-.613 3.58 2.64 2.64 0 01-.945-1.067c-.328-.68-.398-1.534-.398-2.654A1 1 0 005.05 6.05 6.981 6.981 0 003 11a7 7 0 1011.95-4.95c-.592-.591-.98-.985-1.348-1.467-.363-.476-.724-1.063-1.207-2.03zM12.12 15.12A3 3 0 017 13s.879.5 2.5.5c0-1 .5-4 1.25-4.5.5 1 .786 1.293 1.371 1.879A2.99 2.99 0 0113 13a2.99 2.99 0 01-.879 2.121z" clip-rule="evenodd" />
                     </svg>
-                </button>
-            }
-        } else {
-            let onclick = self.link.callback(
-                |_| VideoPlayerEvents::VideoEvent(VideoEvent::Mute)
-            );
-            let update_cb = self.link.callback(
-                |e| VideoPlayerEvents::VideoEvent(VideoEvent::UpdateVol(e))
-            );
-            html!{
-                <div class="inline-block flex justify-start items-center w-36">
-                    <button onclick=onclick class="text-white cursor-pointer focus:outline-none mx-2 h-8 w-8">
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
-                        </svg>
-                    </button>
-                    <input
-                        class="focus:outline-none slider h-1 w-24"
-                        type="range"
-                        min="0"
-                        max="100"
-                        value=self.player.volume
-                        oninput=update_cb
-                    />
                 </div>
-            }
+                <h1 class="text-lg text-white font-semibold">{&self.stats.multiplier}</h1>
+            </div>
+        };
+        
+        let owner_and_title = html!{
+            <div class="flex justify-center items-center mx-1">
+                <h1 class="text-lg text-white font-semibold">
+                    {&self.info.owner} {" - "} {&self.info.title}
+                </h1>
+            </div>
         };
 
-        let fullscreen = {
-            let onclick = self.link.callback(
-                |_| VideoPlayerEvents::VideoEvent(VideoEvent::FullScreen)
-            );
-            html! {
-                <button onclick=onclick class="float-right text-white cursor-pointer focus:outline-none mx-2 h-8 w-8">
-                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
-                   </svg>
-                </button>
-            }
-        };
-
-        let pct_str = format!("{:.1}%", self.player.pct_pos);
-        let value_str = format!("{:.0}", self.player.pct_pos * 10f32);
-
-        let should_send = self.link.callback(
-            |_| VideoPlayerEvents::VideoEvent(VideoEvent::ShouldSend)
-        );
-        let update_cb = self.link.callback(
-            |e| VideoPlayerEvents::VideoEvent(VideoEvent::UpdateSeek(e))
-        );
-
-        let seek_bar = html! {
-            <>
-                <div class="relative h-2 mb-2">
-                    <div class="bg-blue-600 h-2" style={format!("width: {}", pct_str)}></div>
-                    <input
-                        class="absolute top-0 slider bg-transparent focus:outline-none h-2 w-full"
-                        type="range"
-                        min="0"
-                        max="1000"
-                        onmouseup=should_send
-                        oninput=update_cb
-                        value={ value_str }
-                    />
-                </div>
-            </>
-        };
-
-
-        let player_controls = html! {
-            <div class="bg-black bg-opacity-75 rounded-b-lg absolute inset-x-0 bottom-0 h-15">
-                { seek_bar }
-                <div class="flex justify-between mt-1 mb-2">
-                    <div class="flex justify-start items-center">
-                        { play_pause }
-                        { mute }
-                    </div>
-                    <div class="flex justify-end items-center">
-                        { fullscreen }
-                    </div>
+        let stats_block = html!{
+            <div class="flex justify-between mb-2 px-8">
+                { status }
+                { owner_and_title }
+                <div class="flex justify-center">
+                    { members }
+                    { multiplier }
                 </div>
             </div>
         };
 
-        let render = if self.player.ready_state != 0 {
-            html! {
-                <>
-                    { self.player.view() }
-                    { player_controls }
-                </>
-            }
-        } else {
-            html! {
-                <>
-                    <h1 class="w-full text-center text-white tex-5xl font-semibold">
-                        {"Loading video..."}
-                    </h1>
-                    { self.player.view() }
-                </>
-            }
-        };
+        let options = format!("{{type: 'flv', url: 'http://127.0.0.1:7001/live/{}.flv'}}", &self.room_id);
+        let js = format!(r#"
+            if (flvjs.isSupported()) {{
+                var videoElement = document.getElementById('player');
+                var flvPlayer = flvjs.createPlayer({});
+                flvPlayer.attachMediaElement(videoElement);
+                flvPlayer.load();
 
-        html! {
-            <div class="flex justify-center w-full">
-                <div id="video-container" class="relative w-full">
-                    { render }
+                videoElement.onplay = function () {{
+                    setTimeout(() => {{
+                        let max_pos = videoElement.seekable.end(0);
+                        if ((max_pos === Infinity) || (max_pos < 1)) {{
+                            max_pos = 1;
+                        }}
+                        videoElement.currentTime = (max_pos - 1);
+                    }}, 200);
+                    console.log(videoElement.duration, );
+                }};
+            }}
+        "#, &options);
+
+        html!{
+             <div class="w-2/3 h-full my-auto py-4 px-20">
+                <div class="h-full bg-discord-dark rounded-lg p-4">
+                    <div class="w-full mb-4">
+                        { stats_block }
+                        <div class="w-full border-b-4 border-white rounded-full"></div>
+                    </div>
+                    <div class="flex justify-center">
+                        <script src="https://unpkg.com/flv.js/dist/flv.min.js"></script>
+                        <video id="player" class="bg-gray-900" controls=true muted=false></video>
+                        <script>{ js }</script>
+                    </div>
                 </div>
-            </div>
+             </div>
+
         }
-    }
-}
-
-impl VideoPlayer {
-    /// Invokes the relevant callbacks and code on a given video event,
-    /// these are only invoked from the user on the website clicking something
-    /// as an action rather than the websocket invoking something.
-    fn on_video_event(&mut self, event: VideoEvent) {
-        match event {
-            VideoEvent::Play => {
-                if self.first_start {
-                    let msg = WrappingWsMessage {
-                        opcode: opcodes::OP_TIME_CHECK,
-                        payload: None,
-                    };
-
-                    start_future(emit_event(
-                        self.room_id.clone(),
-                        msg,
-                    ));
-
-                    let msg = WrappingWsMessage {
-                        opcode: opcodes::OP_PAUSE,
-                        payload: None,
-                    };
-
-                    start_future(emit_event(
-                        self.room_id.clone(),
-                        msg,
-                    ));
-
-                    self.player.play();
-                    self.player.pause();
-
-                    self.first_start = false;
-                    self.ignore_time_check = true;
-                    return;
-                }
-
-                self.on_play();
-            },
-            VideoEvent::Pause => {
-                self.on_pause();
-            },
-            VideoEvent::Mute => {
-                self.player.mute();
-            },
-            VideoEvent::UnMute => {
-                self.player.unmute();
-            },
-            VideoEvent::FullScreen => {
-                self.player.toggle_fullscreen();
-            },
-            VideoEvent::ShouldSend => {
-                let pos = self.player.get_pos();
-                self.on_seek_complete(pos);
-            },
-            VideoEvent::UpdateSeek(event) => {
-                let pos = event.value.parse::<u32>().unwrap();
-                self.player.pct_pos = pos as f32 / 10f32;
-
-                let dur = self.player.get_duration();
-                let seek_to_mod = self.player.pct_pos / 100f32;
-                let seek_to = (dur as f32 * seek_to_mod) as u32;
-
-                self.player.seek(seek_to);
-            },
-            VideoEvent::UpdatePos => {
-                self.player.update_pos();
-            },
-            VideoEvent::UpdateVol(e) => {
-                let vol = e.value.parse::<u32>().unwrap();
-                self.player.set_vol(vol);
-            },
-        };
-    }
-
-    /// Matches a given websocket event relevant to the video player
-    /// and invokes it's relevant callbacks.
-    fn on_ws_message(&mut self, msg: VideoWebsocketEvent) {
-        match msg {
-            VideoWebsocketEvent::Play => {
-                if self.first_start {
-                    return;
-                }
-
-                self.player.play()
-            },
-            VideoWebsocketEvent::Pause => {
-                if self.first_start {
-                    return;
-                }
-
-                self.player.pause()
-            },
-            VideoWebsocketEvent::Seek(value) => {
-                if self.first_start {
-                    return;
-                }
-
-                let payload: SeekTo = value.unwrap_and_into().unwrap();
-                self.player.seek(payload.pos)
-            },
-            VideoWebsocketEvent::TimeCheck => {
-                if self.ignore_time_check {
-                    self.ignore_time_check = false;
-                    return;
-                }
-
-                let pos = self.player.get_pos();
-                let url = settings::get_time_check_url(&self.room_id);
-                send_post(url, SubmitTimeCheck{ pos })
-            }
-        };
-    }
-
-    /// Invoked when the player has seeked to a location and the mouse has
-    /// been released, this allows the socket to only send one seek request
-    /// per selection and also to minimise socket traffic.
-    fn on_seek_complete(&mut self, pos: u32) {
-        let seek_to = SeekTo { pos };
-        let msg = WrappingWsMessage {
-            opcode: opcodes::OP_SEEK,
-            payload: Some(serde_json::to_value(seek_to).unwrap())
-        };
-
-        start_future(emit_event(self.room_id.clone(), msg));
-    }
-
-    /// Invoked when the play button is clicked on the player, this is not
-    /// invoked when it is called from rust however.
-    fn on_play(&mut self) {
-        let msg = WrappingWsMessage {
-            opcode: opcodes::OP_PLAY,
-            payload: None
-        };
-
-        start_future(emit_event(self.room_id.clone(), msg));
-    }
-
-    /// Invoked when the pause button is clicked on the player, this is not
-    /// invoked when it is called from rust however.
-    fn on_pause(&mut self) {
-        let msg = WrappingWsMessage {
-            opcode: opcodes::OP_PAUSE,
-            payload: None
-        };
-
-        start_future(emit_event(self.room_id.clone(), msg));
     }
 }

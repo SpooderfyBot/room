@@ -49,14 +49,3 @@ pub async fn emit_event<T: Serialize>(room_id: String, payload: T) {
         .await;
 }
 
-
-pub fn send_post<T: Serialize + 'static>(url: String, payload: T) {
-    let fut = async move {
-        let _ = Client::new()
-            .put(&url)
-            .json(&payload)
-            .send()
-            .await;
-    };
-    start_future(fut);
-}

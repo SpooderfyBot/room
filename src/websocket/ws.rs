@@ -217,7 +217,8 @@ impl InternalWebSocket {
         let msg = if let Ok(msg) = maybe_success {
             msg
         } else {
-            ConsoleService::log("Failed to parse incoming message!");
+            let msg = format!("Failed to parse incoming message! {:?}", &msg);
+            ConsoleService::log(&msg);
             return;
         };
 

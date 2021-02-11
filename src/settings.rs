@@ -2,6 +2,7 @@
 
 pub const SCHEMA: &str = "http";
 pub const DOMAIN: &str = "127.0.0.1:8080";
+pub const GATEWAY_DOMAIN: &str = "127.0.0.1:3030";
 pub const WS_PATH: &str = "/ws";
 pub const API_PATH: &str = "/api";
 
@@ -11,11 +12,11 @@ pub const PLAYER_ID: usize = 2;
 
 
 pub fn get_emit_url(room_id: &str) -> String {
-    format!("{}://{}{}/room/{}/emit", SCHEMA, DOMAIN, API_PATH, room_id)
+    format!("{}://{}/emit/{}", SCHEMA, GATEWAY_DOMAIN, room_id)
 }
 
-pub fn get_time_check_url(room_id: &str) -> String {
-    format!("{}://{}{}/room/{}/timesubmit", SCHEMA, DOMAIN, API_PATH, room_id)
+pub fn get_ws_url(room_id: &str) -> String {
+    format!("ws://{}{}/{}", GATEWAY_DOMAIN, WS_PATH, room_id)
 }
 
 pub fn get_webhook_api(room_id: &str) -> String {

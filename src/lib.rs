@@ -3,12 +3,10 @@
 mod binder;
 mod player;
 mod chat;
-mod video;
 mod opcodes;
 mod websocket;
 mod settings;
 mod utils;
-mod webtorrent;
 
 use wasm_bindgen::prelude::*;
 use yew::prelude::*;
@@ -31,9 +29,9 @@ impl Component for MovieRoom {
     type Properties = ();
 
     fn create(_props: Self::Properties, _link: ComponentLink<Self>) -> Self {
-        let url = format!("ws://{}{}", settings::DOMAIN, settings::WS_PATH);
-        let ws = WsHandler::connect(url);
         let room_id = utils::get_room_id();
+        let url = settings::get_ws_url(&room_id);
+        let ws = WsHandler::connect(url);
 
         Self {
             ws,
@@ -219,7 +217,7 @@ impl Component for WsEventDisplay {
         };
 
         html!{
-            <div class="animate-slide fixed bottom-0 flex justify-center w-full ">
+            <div class="animate-slide fixed bottom-0 flex justify-center w-full">
                 <div class=div_style>
                     <h1 class="text-white font-bold w-3/4">
                         { msg }
@@ -234,5 +232,7 @@ impl Component for WsEventDisplay {
 
 #[wasm_bindgen(start)]
 pub fn run_app() {
-    App::<MovieRoom>::new().mount_to_body();
+    let document = yew::utils::document();
+    let elm = document.get_element_by_id("bodyMount").unwrap();
+    App::<MovieRoom>::new().mount(elm);
 }
