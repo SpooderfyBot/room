@@ -1,11 +1,18 @@
 use yew::prelude::*;
-use yew::services::ConsoleService;
+use yew::services::{ConsoleService, TimeoutService};
+use yew::services::timeout::TimeoutTask;
+use wasm_bindgen::closure::Closure;
 
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::Relaxed;
+use std::time::Duration;
 use serde::Deserialize;
 
 use crate::opcodes;
 use crate::settings;
-use crate::websocket::{WsHandler, WebsocketMessage, WebsocketStatus};
+use crate::websocket::{WsHandler, WebsocketMessage};
+use crate::binder;
+
 
 
 /// The set component properties that can be set by the parent component.
@@ -20,8 +27,9 @@ pub struct MediaPlayerProperties {
 
 
 pub enum MediaPlayerEvent {
-    SocketStatus(WebsocketStatus),
-    StatsUpdate(WebsocketMessage)
+    LiveStatus(bool),
+    StatsUpdate(WebsocketMessage),
+    ReCheckVideo,
 }
 
 #[derive(Deserialize)]
@@ -51,16 +59,25 @@ pub struct MediaPlayer {
     /// The player component link for callbacks
     link: ComponentLink<Self>,
 
-    /// The websocket handle for subscribing to events.
-    ws: WsHandler,
-
     /// The current room id.
     room_id: String,
 
+    /// If the ws is connected or not
     is_connected: bool,
 
+    /// The stats of the room.
     stats: Stats,
+
+    /// Info about the room.
     info: VideoInfo,
+
+    task: Option<TimeoutTask>,
+
+    events_set: AtomicBool,
+
+    callback: (Closure<dyn FnMut()>, Closure<dyn FnMut()>),
+
+    timer: usize,
 }
 
 impl Component for MediaPlayer {
@@ -71,13 +88,16 @@ impl Component for MediaPlayer {
         let event_cb = link.callback(
             |event| MediaPlayerEvent::StatsUpdate(event)
         );
-        let status_cb = link.callback(
-            |event| MediaPlayerEvent::SocketStatus(event)
-        );
 
         let ws = props.ws;
         ws.subscribe_to_message(settings::PLAYER_ID, opcodes::OP_STATS_UPDATE, event_cb);
-        ws.subscribe_to_status(settings::PLAYER_ID, status_cb);
+
+        let error_cb = link.callback(|_| MediaPlayerEvent::LiveStatus(false));
+        let connected_cb = link.callback(|_| MediaPlayerEvent::LiveStatus(true));
+
+        let on_error = Closure::wrap(Box::from(move || error_cb.emit(())) as Box<dyn FnMut()>);
+        let on_meta = Closure::wrap(Box::from(move || connected_cb.emit(())) as Box<dyn FnMut()>);
+        let is_set = binder::set_listeners(&on_error, &on_meta);
 
         let stats = Stats {
             members: 1,
@@ -91,11 +111,14 @@ impl Component for MediaPlayer {
 
         Self {
             link: link.clone(),
-            ws,
             room_id: props.room_id,
             is_connected: false,
             stats,
             info,
+            task: None,
+            events_set: AtomicBool::new(is_set),
+            callback: (on_error, on_meta),
+            timer: 0,
         }
     }
 
@@ -117,18 +140,22 @@ impl Component for MediaPlayer {
                     ConsoleService::warn("Failed to parse status update in player");
                 };
             },
-            MediaPlayerEvent::SocketStatus(status) => {
-                match status {
-                    WebsocketStatus::ClosedPermanently => {
-                        self.is_connected = false;
-                    },
-                    WebsocketStatus::Disconnect => {
-                        self.is_connected = false;
-                    },
-                    WebsocketStatus::Connect => {
-                        self.is_connected = true;
+            MediaPlayerEvent::LiveStatus(is_live) => {
+                if !is_live {
+                    if self.timer < ((10 * 6) * 2) {
+                        self.task = Some(TimeoutService::spawn(
+                            Duration::from_secs(10),
+                            self.link.callback(|_| MediaPlayerEvent::ReCheckVideo)
+                        ));
                     }
                 }
+                self.is_connected = is_live;
+                ConsoleService::log("status change");
+            },
+            MediaPlayerEvent::ReCheckVideo => {
+                self.timer += 10;
+                binder::try_reload();
+                ConsoleService::log("reloading");
             }
         }
 
@@ -149,6 +176,12 @@ impl Component for MediaPlayer {
     /// handle the actual video events itself, this just displays the title
     /// and gives controls for track selection.
     fn view(&self) -> Html {
+        if !self.events_set.load(Relaxed) {
+            let is_set = binder::set_listeners(&self.callback.0, &self.callback.1);
+            self.events_set.store(is_set, Relaxed);
+        }
+
+
         let status = if self.is_connected {
             html!{
                 <div class="text-white text-lg font-semibold flex items-center">
@@ -176,7 +209,6 @@ impl Component for MediaPlayer {
                 <h1 class="text-lg text-white font-semibold">{self.stats.members}</h1>
             </div>
         };
-
 
         let multiplier = html!{
             <div class="flex justify-center items-center mx-2">
@@ -208,7 +240,7 @@ impl Component for MediaPlayer {
             </div>
         };
 
-        let options = format!("{{type: 'flv', url: 'http://127.0.0.1:7001/live/{}.flv'}}", &self.room_id);
+        let options = format!("{{type: 'flv', url: 'https://spooderfy.com/live/{}.flv'}}", &self.room_id);
         let js = format!(r#"
             if (flvjs.isSupported()) {{
                 var videoElement = document.getElementById('player');
@@ -224,10 +256,28 @@ impl Component for MediaPlayer {
                         }}
                         videoElement.currentTime = (max_pos - 1);
                     }}, 200);
-                    console.log(videoElement.duration, );
                 }};
             }}
         "#, &options);
+
+        let player_style = if self.is_connected {
+            "bg-gray-900"
+        } else {
+            "bg-gray-900 hidden"
+        };
+
+        let poster_style = if !self.is_connected {
+            "flex justify-center items-center w-full h-full bg-gray-900 rounded-lg shadow-inner"
+        } else {
+            "hidden"
+        };
+
+        let message = if self.timer >= ((10 * 6) * 2) {
+            "The stream has gone to sleep, reload the page when the you're room owner \
+            is ready to start streaming."
+        } else {
+            "Waiting for stream to start"
+        };
 
         html!{
              <div class="w-2/3 h-full my-auto py-4 px-20">
@@ -238,8 +288,20 @@ impl Component for MediaPlayer {
                     </div>
                     <div class="flex justify-center">
                         <script src="https://unpkg.com/flv.js/dist/flv.min.js"></script>
-                        <video id="player" class="bg-gray-900" controls=true muted=false></video>
-                        <script>{ js }</script>
+                        <video id="player" class=player_style controls=true muted=false></video>
+                        <div class=poster_style style="min-height: 30vw;">
+                            <div>
+                                <h1 class="text-white font-bold text-4xl text-center">
+                                    { message }
+                                </h1>
+                                <div class="flex justify-center">
+                                    <img class="w-64 h-64 object-contain rounded-full" src="https://cdn.discordapp.com/attachments/667270372042866699/805836261008211988/Spooderfy_Transparent.png" alt=""/>
+                                </div>
+                            </div>
+                        </div>
+                        <script>
+                            { js }
+                        </script>
                     </div>
                 </div>
              </div>
