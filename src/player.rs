@@ -1,20 +1,11 @@
 use yew::prelude::*;
-use yew::services::{ConsoleService, TimeoutService};
-use yew::services::timeout::TimeoutTask;
-
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering::Relaxed;
-use std::time::Duration;
+use yew::services::ConsoleService;
 
 use serde::Deserialize;
-use reqwest::Client;
-use wasm_bindgen::closure::Closure;
 
 use crate::opcodes;
 use crate::settings;
 use crate::websocket::{WsHandler, WebsocketMessage};
-use crate::binder;
-use crate::utils;
 
 
 /// The set component properties that can be set by the parent component.
@@ -29,10 +20,8 @@ pub struct MediaPlayerProperties {
 
 
 pub enum MediaPlayerEvent {
-    LiveStatus(bool),
+    LiveStream(WebsocketMessage),
     StatsUpdate(WebsocketMessage),
-    ReCheckVideo,
-    GotStreamUrl(String),
 }
 
 #[derive(Deserialize)]
@@ -64,9 +53,6 @@ struct VideoInfo {
 /// handle the actual video events itself, this just displays the title
 /// and gives controls for track selection.
 pub struct MediaPlayer {
-    /// The player component link for callbacks
-    link: ComponentLink<Self>,
-
     /// If the ws is connected or not
     is_connected: bool,
 
@@ -76,15 +62,9 @@ pub struct MediaPlayer {
     /// Info about the room.
     info: VideoInfo,
 
-    task: Option<TimeoutTask>,
-
-    events_set: AtomicBool,
-
-    callback: (Closure<dyn FnMut()>, Closure<dyn FnMut()>),
-
-    timer: usize,
-
     stream_url: String,
+
+    abort: bool,
 }
 
 impl Component for MediaPlayer {
@@ -96,35 +76,14 @@ impl Component for MediaPlayer {
             |event| MediaPlayerEvent::StatsUpdate(event)
         );
 
+        let live_cb = link.callback(
+            |event| MediaPlayerEvent::LiveStream(event)
+        );
+
         let ws = props.ws;
         ws.subscribe_to_message(settings::PLAYER_ID, opcodes::OP_STATS_UPDATE, event_cb);
+        ws.subscribe_to_message(settings::PLAYER_ID, opcodes::OP_LIVE_READY, live_cb);
 
-        let stream_url_cb = link.callback(|url| MediaPlayerEvent::GotStreamUrl(url));
-        let url = settings::get_stream_api_url(&props.room_id);
-        utils::start_with_cb(stream_url_cb, async move {
-            let get_url = url;
-            let resp = Client::new()
-                .get(&get_url)
-                .send()
-                .await;
-
-            return if let Ok(resp) = resp {
-                if let Ok(info) = resp.json::<StreamUrlResp>().await {
-                    info.stream_url
-                } else {
-                    "".to_string()
-                }
-            } else {
-                "".to_string()
-            }
-        });
-
-        let error_cb = link.callback(|_| MediaPlayerEvent::LiveStatus(false));
-        let connected_cb = link.callback(|_| MediaPlayerEvent::LiveStatus(true));
-
-        let on_error = Closure::wrap(Box::from(move || error_cb.emit(())) as Box<dyn FnMut()>);
-        let on_meta = Closure::wrap(Box::from(move || connected_cb.emit(())) as Box<dyn FnMut()>);
-        let is_set = binder::set_listeners(&on_error, &on_meta);
 
         let stats = Stats {
             members: 1,
@@ -137,15 +96,11 @@ impl Component for MediaPlayer {
         };
 
         Self {
-            link: link.clone(),
             is_connected: false,
             stats,
             info,
-            task: None,
-            events_set: AtomicBool::new(is_set),
-            callback: (on_error, on_meta),
-            timer: 0,
-            stream_url: "".to_string()
+            stream_url: "".to_string(),
+            abort: false
         }
     }
 
@@ -167,26 +122,17 @@ impl Component for MediaPlayer {
                     ConsoleService::warn("Failed to parse status update in player");
                 };
             },
-            MediaPlayerEvent::LiveStatus(is_live) => {
-                if !is_live {
-                    if self.timer < ((10 * 6) * 2) {
-                        self.task = Some(TimeoutService::spawn(
-                            Duration::from_secs(10),
-                            self.link.callback(|_| MediaPlayerEvent::ReCheckVideo)
-                        ));
-                    }
+            MediaPlayerEvent::LiveStream(msg) => {
+                let res: Option<StreamUrlResp> = msg.unwrap_and_into();
+                if res.is_none() {
+                    self.abort = true;
+                    return true
                 }
-                self.is_connected = is_live;
-                ConsoleService::log("status change");
+
+                let res = res.unwrap();
+                self.stream_url = res.stream_url;
+                self.is_connected = true;
             },
-            MediaPlayerEvent::ReCheckVideo => {
-                self.timer += 10;
-                binder::try_reload();
-                ConsoleService::log("reloading");
-            },
-            MediaPlayerEvent::GotStreamUrl(url) => {
-                self.stream_url = url;
-            }
         }
 
         true
@@ -206,21 +152,15 @@ impl Component for MediaPlayer {
     /// handle the actual video events itself, this just displays the title
     /// and gives controls for track selection.
     fn view(&self) -> Html {
-        if !self.events_set.load(Relaxed) {
-            let is_set = binder::set_listeners(&self.callback.0, &self.callback.1);
-            self.events_set.store(is_set, Relaxed);
-        }
-
-
         let status = if self.is_connected {
-            html!{
+            html! {
                 <div class="text-white text-lg font-semibold flex items-center">
                     <div class="inline-block bg-green-500 border-2 border-green-400 rounded-full w-2 h-2 p-1 mt-1 mx-2"></div>
                     {"online"}
                 </div>
             }
         } else {
-            html!{
+            html! {
                 <div class="text-white text-lg font-semibold flex items-center">
                     <div class="inline-block bg-red-500 border-2 border-red-400 rounded-full w-2 h-2 p-1 mt-1 mx-2"></div>
                     {"offline"}
@@ -240,7 +180,7 @@ impl Component for MediaPlayer {
             </div>
         };
 
-        let multiplier = html!{
+        let multiplier = html! {
             <div class="flex justify-center items-center mx-2">
                 <div class="w-5 h-5 object-contain text-red-600 mx-2">
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
@@ -250,8 +190,8 @@ impl Component for MediaPlayer {
                 <h1 class="text-lg text-white font-semibold">{&self.stats.multiplier}</h1>
             </div>
         };
-        
-        let owner_and_title = html!{
+
+        let owner_and_title = html! {
             <div class="flex justify-center items-center mx-1">
                 <h1 class="text-lg text-white font-semibold">
                     {&self.info.owner} {" - "} {&self.info.title}
@@ -259,7 +199,7 @@ impl Component for MediaPlayer {
             </div>
         };
 
-        let stats_block = html!{
+        let stats_block = html! {
             <div class="flex justify-between mb-2 px-8">
                 { status }
                 { owner_and_title }
@@ -270,25 +210,29 @@ impl Component for MediaPlayer {
             </div>
         };
 
-        let options = format!("{{type: 'flv', url: '{}'}}", &self.stream_url);
-        let js = format!(r#"
-            if (flvjs.isSupported()) {{
-                var videoElement = document.getElementById('player');
-                var flvPlayer = flvjs.createPlayer({});
-                flvPlayer.attachMediaElement(videoElement);
-                flvPlayer.load();
+        let js = if self.stream_url != "" {
+            let options = format!("{{type: 'flv', url: '{}'}}", &self.stream_url);
+            format!(r#"
+                if (flvjs.isSupported()) {{
+                    var videoElement = document.getElementById('player');
+                    var flvPlayer = flvjs.createPlayer({});
+                    flvPlayer.attachMediaElement(videoElement);
+                    flvPlayer.load();
 
-                videoElement.onplay = function () {{
-                    setTimeout(() => {{
-                        let max_pos = videoElement.seekable.end(0);
-                        if ((max_pos === Infinity) || (max_pos < 1)) {{
-                            max_pos = 1;
-                        }}
-                        videoElement.currentTime = (max_pos - 1);
-                    }}, 200);
-                }};
-            }}
-        "#, &options);
+                    videoElement.onplay = function () {{
+                        setTimeout(() => {{
+                            let max_pos = videoElement.seekable.end(0);
+                            if ((max_pos === Infinity) || (max_pos < 1)) {{
+                                max_pos = 1;
+                            }}
+                            videoElement.currentTime = (max_pos - 1);
+                        }}, 200);
+                    }};
+                }}
+            "#, &options)
+        } else {
+            "".to_string()
+        };
 
         let player_style = if self.is_connected {
             "bg-gray-900"
@@ -296,18 +240,19 @@ impl Component for MediaPlayer {
             "bg-gray-900 hidden"
         };
 
-        let poster_style = if !self.is_connected {
+        let poster_style = if !self.is_connected & !self.abort {
             "flex justify-center items-center w-full h-full bg-gray-900 rounded-lg shadow-inner"
         } else {
             "hidden"
         };
 
-        let message = if self.timer >= ((10 * 6) * 2) {
-            "The stream has gone to sleep, reload the page when the you're room owner \
-            is ready to start streaming."
+        let message =  if self.abort {
+            "Failed to get the necessary info to connect to stream. \
+            Please report this error to our support server."
         } else {
             "Waiting for stream to start"
         };
+
 
         html!{
              <div class="w-2/3 h-full my-auto py-4 px-20">

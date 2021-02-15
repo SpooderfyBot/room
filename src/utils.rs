@@ -1,5 +1,5 @@
 use yew::utils::document;
-use yew::{Component, ComponentLink, Callback};
+use yew::{Component, ComponentLink};
 use std::future::Future;
 use serde::Serialize;
 use reqwest::Client;
@@ -26,17 +26,6 @@ where
 {
     spawn_local(async move {
         link.send_message(future.await);
-    });
-}
-
-
-/// Starts a future with a completion callback.
-pub fn start_with_cb<T: 'static, F>(cb: Callback<T>, future: F)
-where
-    F: Future<Output = T> + 'static,
-{
-    spawn_local(async move {
-        cb.emit(future.await);
     });
 }
 
