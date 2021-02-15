@@ -1,18 +1,20 @@
 use yew::prelude::*;
 use yew::services::{ConsoleService, TimeoutService};
 use yew::services::timeout::TimeoutTask;
-use wasm_bindgen::closure::Closure;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::Duration;
+
 use serde::Deserialize;
+use reqwest::Client;
+use wasm_bindgen::closure::Closure;
 
 use crate::opcodes;
 use crate::settings;
 use crate::websocket::{WsHandler, WebsocketMessage};
 use crate::binder;
-
+use crate::utils;
 
 
 /// The set component properties that can be set by the parent component.
@@ -30,6 +32,12 @@ pub enum MediaPlayerEvent {
     LiveStatus(bool),
     StatsUpdate(WebsocketMessage),
     ReCheckVideo,
+    GotStreamUrl(String),
+}
+
+#[derive(Deserialize)]
+struct StreamUrlResp {
+    stream_url: String,
 }
 
 #[derive(Deserialize)]
@@ -59,9 +67,6 @@ pub struct MediaPlayer {
     /// The player component link for callbacks
     link: ComponentLink<Self>,
 
-    /// The current room id.
-    room_id: String,
-
     /// If the ws is connected or not
     is_connected: bool,
 
@@ -78,6 +83,8 @@ pub struct MediaPlayer {
     callback: (Closure<dyn FnMut()>, Closure<dyn FnMut()>),
 
     timer: usize,
+
+    stream_url: String,
 }
 
 impl Component for MediaPlayer {
@@ -91,6 +98,26 @@ impl Component for MediaPlayer {
 
         let ws = props.ws;
         ws.subscribe_to_message(settings::PLAYER_ID, opcodes::OP_STATS_UPDATE, event_cb);
+
+        let stream_url_cb = link.callback(|url| MediaPlayerEvent::GotStreamUrl(url));
+        let url = settings::get_stream_api_url(&props.room_id);
+        utils::start_with_cb(stream_url_cb, async move {
+            let get_url = url;
+            let resp = Client::new()
+                .get(&get_url)
+                .send()
+                .await;
+
+            return if let Ok(resp) = resp {
+                if let Ok(info) = resp.json::<StreamUrlResp>().await {
+                    info.stream_url
+                } else {
+                    "".to_string()
+                }
+            } else {
+                "".to_string()
+            }
+        });
 
         let error_cb = link.callback(|_| MediaPlayerEvent::LiveStatus(false));
         let connected_cb = link.callback(|_| MediaPlayerEvent::LiveStatus(true));
@@ -111,7 +138,6 @@ impl Component for MediaPlayer {
 
         Self {
             link: link.clone(),
-            room_id: props.room_id,
             is_connected: false,
             stats,
             info,
@@ -119,6 +145,7 @@ impl Component for MediaPlayer {
             events_set: AtomicBool::new(is_set),
             callback: (on_error, on_meta),
             timer: 0,
+            stream_url: "".to_string()
         }
     }
 
@@ -156,6 +183,9 @@ impl Component for MediaPlayer {
                 self.timer += 10;
                 binder::try_reload();
                 ConsoleService::log("reloading");
+            },
+            MediaPlayerEvent::GotStreamUrl(url) => {
+                self.stream_url = url;
             }
         }
 
@@ -240,7 +270,7 @@ impl Component for MediaPlayer {
             </div>
         };
 
-        let options = format!("{{type: 'flv', url: 'https://spooderfy.com/live/{}.flv'}}", &self.room_id);
+        let options = format!("{{type: 'flv', url: '{}'}}", &self.stream_url);
         let js = format!(r#"
             if (flvjs.isSupported()) {{
                 var videoElement = document.getElementById('player');
