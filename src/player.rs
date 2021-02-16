@@ -211,7 +211,7 @@ impl Component for MediaPlayer {
         };
 
         let js = if self.stream_url != "" {
-            let options = format!("{{type: 'flv', url: '{}'}}", &self.stream_url);
+            let options = format!("{{type: 'flv', isLive: true, url: '{}'}}", &self.stream_url);
             format!(r#"
                 if (flvjs.isSupported()) {{
                     var videoElement = document.getElementById('player');
