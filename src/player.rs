@@ -215,7 +215,7 @@ impl Component for MediaPlayer {
             format!(r#"
                 if (flvjs.isSupported()) {{
                     var videoElement = document.getElementById('player');
-                    var flvPlayer = flvjs.createPlayer({});
+                    var flvPlayer = flvjs.createPlayer({}, {{autoCleanupSourceBuffer: true}});
                     flvPlayer.attachMediaElement(videoElement);
                     flvPlayer.load();
 
