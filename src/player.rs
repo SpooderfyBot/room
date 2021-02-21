@@ -214,8 +214,8 @@ impl Component for MediaPlayer {
             let options = format!("{{type: 'flv', isLive: true, url: '{}'}}", &self.stream_url);
             format!(r#"
                 if (flvjs.isSupported()) {{
-                    var videoElement = document.getElementById('player');
-                    var flvPlayer = flvjs.createPlayer({}, {{autoCleanupSourceBuffer: true}});
+                    let videoElement = document.getElementById('player');
+                    let flvPlayer = flvjs.createPlayer({}, {{autoCleanupSourceBuffer: true}});
                     flvPlayer.attachMediaElement(videoElement);
                     flvPlayer.load();
 
@@ -228,6 +228,15 @@ impl Component for MediaPlayer {
                             videoElement.currentTime = (max_pos - 1);
                         }}, 200);
                     }};
+
+                    flvPlayer.on('error', function (event) {{
+                        // todo make this not just derp
+
+                        flvPlayer.pause();
+                        flvPlayer.unload();
+                        flvPlayer.load();
+                        flvPlayer.play();
+                    }})
                 }}
             "#, &options)
         } else {
