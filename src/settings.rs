@@ -1,8 +1,8 @@
 #![allow(unused)]
 
 pub const SCHEMA: &str = "https";
-pub const DOMAIN: &str = "192.168.0.25:8080";
-pub const GATEWAY_DOMAIN: &str = "192.168.0.25:3030";
+pub const DOMAIN: &str = "spooderfy.com";
+pub const GATEWAY_DOMAIN: &str = "gateway.spooderfy.com";
 pub const WS_PATH: &str = "/ws";
 pub const API_PATH: &str = "/api";
 
