@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-pub const SCHEMA: &str = "http";
+pub const SCHEMA: &str = "https";
 pub const DOMAIN: &str = "192.168.0.25:8080";
 pub const GATEWAY_DOMAIN: &str = "192.168.0.25:3030";
 pub const WS_PATH: &str = "/ws";
@@ -16,7 +16,7 @@ pub fn get_emit_url(room_id: &str) -> String {
 }
 
 pub fn get_ws_url(room_id: &str) -> String {
-    format!("ws://{}{}/{}", GATEWAY_DOMAIN, WS_PATH, room_id)
+    format!("wss://{}{}/{}", GATEWAY_DOMAIN, WS_PATH, room_id)
 }
 
 pub fn get_webhook_api(room_id: &str) -> String {
