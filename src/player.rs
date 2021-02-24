@@ -211,9 +211,9 @@ impl Component for MediaPlayer {
         };
 
         let player_style = if self.is_connected {
-            "bg-gray-900 video-js"
+            "bg-gray-900 video-js vjs-live vjs-liveui"
         } else {
-            "bg-gray-900 video-js hidden"
+            "bg-gray-900 video-js vjs-live vjs-liveui hidden"
         };
 
         let poster_style = if !self.is_connected & !self.abort {
@@ -239,7 +239,7 @@ impl Component for MediaPlayer {
                     </div>
                     <div class="flex justify-center">
                         <video-js
-                            id="video-1"
+                            id="player"
                             data-setup="{'liveui': true}"
                             class=player_style
                             controls=true
@@ -251,7 +251,7 @@ impl Component for MediaPlayer {
                         <script src="https://vjs.zencdn.net/7.10.2/video.min.js"></script>
                         <script src="https://unpkg.com/browse/@videojs/http-streaming@2.6.1/dist/videojs-http-streaming.min.js"></script>
                         <script>
-                            {"var player = videojs('video-1');"}
+                            {"var player = videojs('player');"}
                         </script>
                         <div class=poster_style style="min-height: 30vw;">
                             <div>
