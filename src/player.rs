@@ -210,10 +210,28 @@ impl Component for MediaPlayer {
             </div>
         };
 
-        let player_style = if self.is_connected {
-            "bg-gray-900 video-js vjs-live vjs-liveui w-full"
+        let player = if self.is_connected {
+            html! {
+                 <>
+                    <video-js
+                        id="player"
+                        class="bg-gray-900 video-js vjs-live vjs-liveui w-full"
+                        controls=true
+                        preload="auto"
+                        width="100%"
+                        height="100%"
+                        style="min-height: 30vw;">
+                        <source src=&self.stream_url type="application/x-mpegURL"/>
+                    </video-js>
+                    <script src="https://vjs.zencdn.net/7.10.2/video.min.js"></script>
+                    <script src="https://unpkg.com/browse/@videojs/http-streaming@2.6.1/dist/videojs-http-streaming.min.js"></script>
+                    <script>
+                        {"var player = videojs('player', {'liveui': true});"}
+                    </script>
+                 </>
+            }
         } else {
-            "bg-gray-900 video-js vjs-live vjs-liveui w-full hidden"
+            html!{}
         };
 
         let poster_style = if !self.is_connected & !self.abort {
@@ -238,21 +256,7 @@ impl Component for MediaPlayer {
                         <div class="w-full border-b-4 border-white rounded-full"></div>
                     </div>
                     <div class="flex justify-center">
-                        <video-js
-                            id="player"
-                            class=player_style
-                            controls=true
-                            preload="auto"
-                            width="100%"
-                            height="100%"
-                            style="min-height: 30vw;">
-                            <source src=&self.stream_url type="application/x-mpegURL"/>
-                        </video-js>
-                        <script src="https://vjs.zencdn.net/7.10.2/video.min.js"></script>
-                        <script src="https://unpkg.com/browse/@videojs/http-streaming@2.6.1/dist/videojs-http-streaming.min.js"></script>
-                        <script>
-                            {"var player = videojs('player', {'liveui': true});"}
-                        </script>
+                        { player }
                         <div class=poster_style style="min-height: 30vw;">
                             <div>
                                 <h1 class="text-white font-bold text-4xl text-center">
