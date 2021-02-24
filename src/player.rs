@@ -240,18 +240,18 @@ impl Component for MediaPlayer {
                     <div class="flex justify-center">
                         <video-js
                             id="player"
-                            data-setup="{'liveui': true}"
                             class=player_style
                             controls=true
                             preload="auto"
                             width="100%"
-                            height="100%">
+                            height="100%"
+                            style="min-height: 30vw;">
                             <source src=&self.stream_url type="application/x-mpegURL"/>
                         </video-js>
                         <script src="https://vjs.zencdn.net/7.10.2/video.min.js"></script>
                         <script src="https://unpkg.com/browse/@videojs/http-streaming@2.6.1/dist/videojs-http-streaming.min.js"></script>
                         <script>
-                            {"var player = videojs('player');"}
+                            {"var player = videojs('player', {'liveui': true});"}
                         </script>
                         <div class=poster_style style="min-height: 30vw;">
                             <div>
