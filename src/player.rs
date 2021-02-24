@@ -211,9 +211,9 @@ impl Component for MediaPlayer {
         };
 
         let player_style = if self.is_connected {
-            "bg-gray-900"
+            "bg-gray-900 video-js"
         } else {
-            "bg-gray-900 hidden"
+            "bg-gray-900 video-js hidden"
         };
 
         let poster_style = if !self.is_connected & !self.abort {
@@ -238,7 +238,14 @@ impl Component for MediaPlayer {
                         <div class="w-full border-b-4 border-white rounded-full"></div>
                     </div>
                     <div class="flex justify-center">
-                        <video-js id="video-1" data-setup="{'liveui': true}" class=player_style>
+                        <video-js
+                            id="video-1"
+                            data-setup="{'liveui': true}"
+                            class=player_style
+                            controls=true
+                            preload="auto"
+                            width="100%"
+                            height="100%">
                             <source src=&self.stream_url type="application/x-mpegURL"/>
                         </video-js>
                         <script src="https://vjs.zencdn.net/7.10.2/video.min.js"></script>
