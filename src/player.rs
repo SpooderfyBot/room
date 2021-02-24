@@ -210,39 +210,6 @@ impl Component for MediaPlayer {
             </div>
         };
 
-        let js = if self.stream_url != "" {
-            let options = format!("{{type: 'flv', isLive: true, url: '{}'}}", &self.stream_url);
-            format!(r#"
-                if (flvjs.isSupported()) {{
-                    let videoElement = document.getElementById('player');
-                    let flvPlayer = flvjs.createPlayer({}, {{autoCleanupSourceBuffer: true}});
-                    flvPlayer.attachMediaElement(videoElement);
-                    flvPlayer.load();
-
-                    videoElement.onplay = function () {{
-                        setTimeout(() => {{
-                            let max_pos = videoElement.seekable.end(0);
-                            if ((max_pos === Infinity) || (max_pos < 1)) {{
-                                max_pos = 1;
-                            }}
-                            videoElement.currentTime = (max_pos - 1);
-                        }}, 200);
-                    }};
-
-                    flvPlayer.on('error', function (event) {{
-                        // todo make this not just derp
-
-                        flvPlayer.pause();
-                        flvPlayer.unload();
-                        flvPlayer.load();
-                        flvPlayer.play();
-                    }})
-                }}
-            "#, &options)
-        } else {
-            "".to_string()
-        };
-
         let player_style = if self.is_connected {
             "bg-gray-900"
         } else {
@@ -271,8 +238,14 @@ impl Component for MediaPlayer {
                         <div class="w-full border-b-4 border-white rounded-full"></div>
                     </div>
                     <div class="flex justify-center">
-                        <script src="https://unpkg.com/flv.js/dist/flv.min.js"></script>
-                        <video id="player" class=player_style controls=true muted=false></video>
+                        <video-js id="video-1" data-setup="{'liveui': true}" class=player_style>
+                            <source src=&self.stream_url type="application/x-mpegURL"/>
+                        </video-js>
+                        <script src="https://vjs.zencdn.net/7.10.2/video.min.js"></script>
+                        <script src="https://unpkg.com/browse/@videojs/http-streaming@2.6.1/dist/videojs-http-streaming.min.js"></script>
+                        <script>
+                            {"var player = videojs('video-1');"}
+                        </script>
                         <div class=poster_style style="min-height: 30vw;">
                             <div>
                                 <h1 class="text-white font-bold text-4xl text-center">
@@ -283,9 +256,6 @@ impl Component for MediaPlayer {
                                 </div>
                             </div>
                         </div>
-                        <script>
-                            { js }
-                        </script>
                     </div>
                 </div>
              </div>
