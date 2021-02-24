@@ -211,9 +211,9 @@ impl Component for MediaPlayer {
         };
 
         let player_style = if self.is_connected {
-            "bg-gray-900 video-js vjs-live vjs-liveui"
+            "bg-gray-900 video-js vjs-live vjs-liveui w-full"
         } else {
-            "bg-gray-900 video-js vjs-live vjs-liveui hidden"
+            "bg-gray-900 video-js vjs-live vjs-liveui w-full hidden"
         };
 
         let poster_style = if !self.is_connected & !self.abort {
