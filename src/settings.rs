@@ -10,9 +10,8 @@ pub const EVENT_DISPLAY_ID: usize = 0;
 pub const CHAT_ID: usize = 1;
 pub const PLAYER_ID: usize = 2;
 
-
 pub fn get_emit_url(room_id: &str) -> String {
-    format!("{}://{}/emit/{}", SCHEMA, GATEWAY_DOMAIN, room_id)
+    format!("{}://{}{}/{}/emit", SCHEMA, DOMAIN, API_PATH, room_id)
 }
 
 pub fn get_ws_url(room_id: &str) -> String {
